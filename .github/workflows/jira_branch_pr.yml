@@ -1,0 +1,188 @@
+name: Create PR from Jira branch
+
+on:
+  create
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  jira-branch-to-pr:
+    if: >
+      github.ref_type == 'branch' &&
+      startsWith(github.ref_name, format('{0}-', vars.JIRA_PROJECT_KEY))
+
+    runs-on: ubuntu-latest
+
+    env:
+      JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+      JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
+      BASE_BRANCH: main
+
+    steps:
+      - name: Extract Jira issue key from branch name
+        id: extract
+        shell: bash
+        run: |
+          branch_name="${GITHUB_REF_NAME}"
+
+          if [[ "$branch_name" =~ ^(${JIRA_PROJECT_KEY}-[0-9]+)(-|$) ]]; then
+            issue_key="${BASH_REMATCH[1]}"
+            echo "issue_key=$issue_key" >> "$GITHUB_OUTPUT"
+            echo "Matched Jira issue key: $issue_key"
+          else
+            echo "Branch name does not match expected Jira format for project ${JIRA_PROJECT_KEY}: ${branch_name}"
+            exit 1
+          fi
+
+      - name: Fetch Jira issue
+        id: jira
+        shell: bash
+        env:
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          issue_key="${{ steps.extract.outputs.issue_key }}"
+          response_file="$(mktemp)"
+
+          status_code="$(
+            curl -sS \
+              -u "${JIRA_EMAIL}:${JIRA_API_TOKEN}" \
+              -H "Accept: application/json" \
+              -o "$response_file" \
+              -w "%{http_code}" \
+              "${JIRA_BASE_URL}/rest/api/2/issue/${issue_key}?fields=summary,description"
+          )"
+
+          if [[ "$status_code" != "200" ]]; then
+            echo "Jira API call failed with HTTP ${status_code}"
+            cat "$response_file"
+            exit 1
+          fi
+
+          summary="$(jq -r '.fields.summary // ""' "$response_file")"
+
+          # Jira Cloud description is often Atlassian Document Format JSON.
+          # This flattens text nodes into a plain text approximation.
+          description_text="$(
+            jq -r '
+              .fields.description
+              | if . == null then ""
+                elif type == "string" then .
+                else
+                  [.. | objects | select(.type? == "text") | .text] | join("\n")
+                end
+            ' "$response_file"
+          )"
+
+          {
+            echo "issue_key=$issue_key"
+            echo "summary<<EOF"
+            echo "$summary"
+            echo "EOF"
+            echo "description<<EOF"
+            echo "$description_text"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout new branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Ensure README exists
+        shell: bash
+        run: |
+          [[ -f README.md ]] || touch README.md
+
+      - name: Update README.md with Jira details
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          issue_key='${{ steps.jira.outputs.issue_key }}'
+          summary='${{ steps.jira.outputs.summary }}'
+
+          cat <<'EOF' >> README.md
+
+          ## Jira Issue: ${{ steps.jira.outputs.issue_key }}
+
+          **Summary:** ${{ steps.jira.outputs.summary }}
+
+          **Description:**
+          ${{ steps.jira.outputs.description }}
+
+          EOF
+
+      - name: Commit and push README change
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add README.md
+
+          if git diff --cached --quiet; then
+            echo "No README changes to commit."
+            exit 0
+          fi
+
+          git commit -m "docs: add Jira issue details for ${{ steps.jira.outputs.issue_key }}"
+          git push origin "${GITHUB_REF_NAME}"
+
+      - name: Check whether PR already exists
+        id: prcheck
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_count="$(gh pr list \
+            --head "${GITHUB_REF_NAME}" \
+            --base "${BASE_BRANCH}" \
+            --state open \
+            --json number \
+            --jq 'length')"
+
+          echo "count=${pr_count}" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request to main
+        if: steps.prcheck.outputs.count == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh pr create \
+            --base "${BASE_BRANCH}" \
+            --head "${GITHUB_REF_NAME}" \
+            --title "${{ steps.jira.outputs.issue_key }}: ${{ steps.jira.outputs.summary }}" \
+            --body "$(cat <<EOF
+          This PR was auto-created from branch \`${GITHUB_REF_NAME}\`.
+
+          **Jira issue:** ${{ steps.jira.outputs.issue_key }}
+          **Summary:** ${{ steps.jira.outputs.summary }}
+
+          README.md was updated with the Jira description content.
+          EOF
+          )"
+
+      - name: Write job summary
+        shell: bash
+        run: |
+          {
+            echo "## Jira branch workflow"
+            echo
+            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+            echo "- Issue: \`${{ steps.jira.outputs.issue_key }}\`"
+            echo "- Summary: ${{ steps.jira.outputs.summary }}"
+            echo "- Base branch: \`${BASE_BRANCH}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
