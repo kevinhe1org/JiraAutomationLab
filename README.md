@@ -14,3 +14,11 @@ this is a test. Hopefully it makes a branch in github
 **Description:**
 this is a test. Hopefully it makes a branch in github
 
+
+## Jira Issue: GT-3
+
+**Summary:** automation rule test
+
+**Description:**
+this is a test. Hopefully it makes a branch in github
+
