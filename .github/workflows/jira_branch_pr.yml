@@ -9,12 +9,10 @@ permissions:
 
 jobs:
   jira-branch-to-pr:
-  if: >
-    github.ref_type == 'branch' &&
-    startsWith(github.ref_name, 'automation/')
-
+    if: >
+      github.ref_type == 'branch' &&
+      startsWith(github.ref_name, 'automation/')
     runs-on: ubuntu-latest
-
     env:
       JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
       JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
