@@ -9,9 +9,9 @@ permissions:
 
 jobs:
   jira-branch-to-pr:
-    if: >
-      github.ref_type == 'branch' &&
-      startsWith(github.ref_name, format('feature/jira-automation-{0}-', vars.JIRA_PROJECT_KEY))
+  if: >
+    github.ref_type == 'branch' &&
+    startsWith(github.ref_name, 'automation/')
 
     runs-on: ubuntu-latest
 
@@ -25,14 +25,17 @@ jobs:
         id: extract
         shell: bash
         run: |
+          set -euo pipefail
+
           branch_name="${GITHUB_REF_NAME}"
 
-          if [[ "$branch_name" =~ ^(feature/jira-automation-${JIRA_PROJECT_KEY}-[0-9]+)(-|$) ]]; then
+          if [[ "$branch_name" =~ ^automation/(${JIRA_PROJECT_KEY}-[0-9]+)$ ]]; then
             issue_key="${BASH_REMATCH[1]}"
             echo "issue_key=$issue_key" >> "$GITHUB_OUTPUT"
             echo "Matched Jira issue key: $issue_key"
           else
-            echo "Branch name does not match expected Jira format for project ${JIRA_PROJECT_KEY}: ${branch_name}"
+            echo "Branch name does not match expected format: automation/${JIRA_PROJECT_KEY}-<number>"
+            echo "Actual branch: ${branch_name}"
             exit 1
           fi
 
