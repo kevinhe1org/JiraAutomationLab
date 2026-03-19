@@ -36,6 +36,53 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve Jira field IDs
+        id: jira_fields
+        shell: bash
+        env:
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          fields_file="$(mktemp)"
+
+          status_code="$(
+            curl -sS \
+              -u "${JIRA_EMAIL}:${JIRA_API_TOKEN}" \
+              -H "Accept: application/json" \
+              -o "$fields_file" \
+              -w "%{http_code}" \
+              "${JIRA_BASE_URL}/rest/api/3/field"
+          )"
+
+          if [[ "$status_code" != "200" ]]; then
+            echo "Failed to fetch Jira fields. HTTP ${status_code}"
+            cat "$fields_file"
+            exit 1
+          fi
+
+          source_ip_field_id="$(
+            jq -r '.[] | select(.name == "Source IP") | .id' "$fields_file" | head -n1
+          )"
+
+          destinations_field_id="$(
+            jq -r '.[] | select(.name == "Destinations") | .id' "$fields_file" | head -n1
+          )"
+
+          if [[ -z "${source_ip_field_id}" || "${source_ip_field_id}" == "null" ]]; then
+            echo "Could not find Jira field named: Source IP"
+            exit 1
+          fi
+
+          if [[ -z "${destinations_field_id}" || "${destinations_field_id}" == "null" ]]; then
+            echo "Could not find Jira field named: Destinations"
+            exit 1
+          fi
+
+          echo "source_ip_field_id=${source_ip_field_id}" >> "$GITHUB_OUTPUT"
+          echo "destinations_field_id=${destinations_field_id}" >> "$GITHUB_OUTPUT"
+
       - name: Fetch Jira issue
         id: jira
         shell: bash
@@ -46,6 +93,8 @@ jobs:
           set -euo pipefail
 
           issue_key="${{ steps.extract.outputs.issue_key }}"
+          source_ip_field_id="${{ steps.jira_fields.outputs.source_ip_field_id }}"
+          destinations_field_id="${{ steps.jira_fields.outputs.destinations_field_id }}"
           response_file="$(mktemp)"
 
           status_code="$(
@@ -54,7 +103,7 @@ jobs:
               -H "Accept: application/json" \
               -o "$response_file" \
               -w "%{http_code}" \
-              "${JIRA_BASE_URL}/rest/api/2/issue/${issue_key}?fields=summary,description"
+              "${JIRA_BASE_URL}/rest/api/3/issue/${issue_key}?fields=summary,description,${source_ip_field_id},${destinations_field_id}"
           )"
 
           if [[ "$status_code" != "200" ]]; then
@@ -65,16 +114,66 @@ jobs:
 
           summary="$(jq -r '.fields.summary // ""' "$response_file")"
 
-          # Jira Cloud description is often Atlassian Document Format JSON.
-          # This flattens text nodes into a plain text approximation.
           description_text="$(
             jq -r '
-              .fields.description
-              | if . == null then ""
+              def flatten:
+                if . == null then ""
                 elif type == "string" then .
-                else
-                  [.. | objects | select(.type? == "text") | .text] | join("\n")
-                end
+                elif type == "number" or type == "boolean" then tostring
+                elif type == "array" then map(flatten) | map(select(. != "")) | join(", ")
+                elif type == "object" then
+                  if has("text") then .text
+                  elif has("value") then .value
+                  elif has("name") then .name
+                  elif has("content") then (.content | flatten)
+                  else ""
+                  end
+                else ""
+                end;
+
+              .fields.description | flatten
+            ' "$response_file"
+          )"
+
+          source_ip_value="$(
+            jq -r --arg field "$source_ip_field_id" '
+              def flatten:
+                if . == null then ""
+                elif type == "string" then .
+                elif type == "number" or type == "boolean" then tostring
+                elif type == "array" then map(flatten) | map(select(. != "")) | join(", ")
+                elif type == "object" then
+                  if has("value") then .value
+                  elif has("name") then .name
+                  elif has("text") then .text
+                  elif has("content") then (.content | flatten)
+                  else tostring
+                  end
+                else ""
+                end;
+
+              .fields[$field] | flatten
+            ' "$response_file"
+          )"
+
+          destinations_value="$(
+            jq -r --arg field "$destinations_field_id" '
+              def flatten:
+                if . == null then ""
+                elif type == "string" then .
+                elif type == "number" or type == "boolean" then tostring
+                elif type == "array" then map(flatten) | map(select(. != "")) | join(", ")
+                elif type == "object" then
+                  if has("value") then .value
+                  elif has("name") then .name
+                  elif has("text") then .text
+                  elif has("content") then (.content | flatten)
+                  else tostring
+                  end
+                else ""
+                end;
+
+              .fields[$field] | flatten
             ' "$response_file"
           )"
 
@@ -85,6 +184,12 @@ jobs:
             echo "EOF"
             echo "description<<EOF"
             echo "$description_text"
+            echo "EOF"
+            echo "source_ip<<EOF"
+            echo "$source_ip_value"
+            echo "EOF"
+            echo "destinations<<EOF"
+            echo "$destinations_value"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -104,18 +209,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          issue_key='${{ steps.jira.outputs.issue_key }}'
-          summary='${{ steps.jira.outputs.summary }}'
-
-          cat <<'EOF' >> README.md
-
-          ## Jira Issue: ${{ steps.jira.outputs.issue_key }}
-
-          **Summary:** ${{ steps.jira.outputs.summary }}
-
-          **Description:**
-          ${{ steps.jira.outputs.description }}
-
+          cat <<EOF >> README.md
+            client.address=${{ steps.jira.outputs.source_ip }} url.host.exact=${{ steps.jira.outputs.destinations }}
           EOF
 
       - name: Commit and push README change
